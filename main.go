@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"log"
 	"strings"
@@ -83,7 +82,7 @@ type KeyManager struct {
 // 256: 24 phrases
 func NewKeyManager(bitSize int, passphrase, mnemonic string) (*KeyManager, error) {
 
-	if(mnemonic == ""){
+	if mnemonic == "" {
 		entropy, err := bip39.NewEntropy(bitSize)
 		if err != nil {
 			return nil, err
@@ -316,84 +315,46 @@ func GenerateFromBytes(prvKey *btcec.PrivateKey, compress bool) (wif, address, s
 }
 
 func main() {
-	compress := true // generate a compressed public key
-	bip39 := flag.Bool("bip39", false, "mnemonic code for generating deterministic keys")
-	pass := flag.String("pass", "", "protect bip39 mnemonic with a passphrase")
-	number := flag.Int("n", 10, "set number of keys to generate")
-	mnemonic := flag.String("mnemonic", "", "optional list of words to re-generate a root key")
+	// BIP39 MNEMONIC
+	passphrase := "chooseYourPassword"
+	km, err := NewKeyManager(256, passphrase, "")
+	//km, err := NewKeyManager(256, passphrase, "afford invest lady negative mango left hurdle three tragic short outside gentle dawn combine action obvious ready move dune reduce puppy nature choice diagram") // optionally reuse an existing mnemonic
 
-	flag.Parse()
-
-	if !*bip39 {
-		fmt.Printf("\n%-34s %-52s %-42s %s\n", "Bitcoin Address", "WIF(Wallet Import Format)", "SegWit(bech32)", "SegWit(nested)")
-		fmt.Println(strings.Repeat("-", 165))
-
-		for i := 0; i < *number; i++ {
-			wif, address, segwitBech32, segwitNested, err := Generate(compress)
-			if err != nil {
-				log.Fatal(err)
-			}
-			fmt.Printf("%-34s %s %s %s\n", address, wif, segwitBech32, segwitNested)
-		}
-		fmt.Println()
-		return
-	}
-
-	km, err := NewKeyManager(128, *pass, *mnemonic)
 	if err != nil {
 		log.Fatal(err)
 	}
-	masterKey, err := km.GetMasterKey()
-	if err != nil {
-		log.Fatal(err)
-	}
-	passphrase := km.GetPassphrase()
-	if passphrase == "" {
-		passphrase = "<none>"
-	}
+
 	fmt.Printf("\n%-18s %s\n", "BIP39 Mnemonic:", km.GetMnemonic())
-	fmt.Printf("%-18s %s\n", "BIP39 Passphrase:", passphrase)
-	fmt.Printf("%-18s %x\n", "BIP39 Seed:", km.GetSeed())
-	fmt.Printf("%-18s %s\n", "BIP32 Root Key:", masterKey.B58Serialize())
+	fmt.Printf("%-18s %x\n", "BIP39 Seed:", km.GetSeed())     // Only for the record. Not needed for Relai's purposes
+	fmt.Printf("%-18s %s\n", "BIP39 Passphrase:", passphrase) // Only for the record. Not needed for Relai's purposes
 
-	fmt.Printf("\n%-18s %-34s %-52s\n", "Path(BIP44)", "Bitcoin Address", "WIF(Wallet Import Format)")
-	fmt.Println(strings.Repeat("-", 106))
-	for i := 0; i < *number; i++ {
-		key, err := km.GetKey(PurposeBIP44, CoinTypeBTC, 0, 0, uint32(i))
-		if err != nil {
-			log.Fatal(err)
-		}
-		wif, address, _, _, err := key.Encode(compress)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		fmt.Printf("%-18s %-34s %s\n", key.GetPath(), address, wif)
-	}
-
-	fmt.Printf("\n%-18s %-34s %s\n", "Path(BIP49)", "SegWit(nested)", "WIF(Wallet Import Format)")
-	fmt.Println(strings.Repeat("-", 106))
-	for i := 0; i < *number; i++ {
-		key, err := km.GetKey(PurposeBIP49, CoinTypeBTC, 0, 0, uint32(i))
-		if err != nil {
-			log.Fatal(err)
-		}
-		wif, _, _, segwitNested, err := key.Encode(compress)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		fmt.Printf("%-18s %s %s\n", key.GetPath(), segwitNested, wif)
-	}
-
-	fmt.Printf("\n%-18s %-42s %s\n", "Path(BIP84)", "SegWit(bech32)", "WIF(Wallet Import Format)")
+	fmt.Println("\nADDRESSES FOR DEPOSITS FROM EXTERNAL WALLETS (EXCHANGES, USERS)")
 	fmt.Println(strings.Repeat("-", 114))
-	for i := 0; i < *number; i++ {
+	fmt.Printf("%-18s %-42s %s\n", "Path(BIP84)", "SegWit(bech32)", "WIF(Wallet Import Format)")
+	fmt.Println(strings.Repeat("-", 114))
+	for i := 0; i < 10; i++ {
 		key, err := km.GetKey(PurposeBIP84, CoinTypeBTC, 0, 0, uint32(i))
 		if err != nil {
 			log.Fatal(err)
 		}
-		wif, _, segwitBech32, _, err := key.Encode(compress)
+		wif, _, segwitBech32, _, err := key.Encode(true)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		fmt.Printf("%-18s %s %s\n", key.GetPath(), segwitBech32, wif)
+	}
+
+	fmt.Println("\nADDRESSES FOR CHANGE (MIGHT BE SENT TO COLD STORAGE, IN THAT CASE FORGET ABOUT IT)")
+	fmt.Println(strings.Repeat("-", 114))
+	fmt.Printf("%-18s %-42s %s\n", "Path(BIP84)", "SegWit(bech32)", "WIF(Wallet Import Format)")
+	fmt.Println(strings.Repeat("-", 114))
+	for i := 0; i < 10; i++ {
+		key, err := km.GetKey(PurposeBIP84, CoinTypeBTC, 0, 1, uint32(i))
+		if err != nil {
+			log.Fatal(err)
+		}
+		wif, _, segwitBech32, _, err := key.Encode(true)
 		if err != nil {
 			log.Fatal(err)
 		}

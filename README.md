@@ -1,6 +1,16 @@
 btckeygen <img src="https://www.buybitcoinworldwide.com/img/segwit.png" width="100">
 =========
 
+Relai
+-----
+Opiniated version of the [Go btckeygen](https://github.com/modood/btckeygen), adjusted to Relai's needs.
+
+Change into the root dir and run as follows:
+```go run main.go```
+
+Original README.md
+------------------
+
 [![license](https://img.shields.io/badge/license-WTFPL%20--%20Do%20What%20the%20Fuck%20You%20Want%20to%20Public%20License-green.svg)](https://github.com/modood/btckeygen/blob/master/LICENSE)
 
 A simple and easy to use bitcoin key generator
