@@ -1,10 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
+	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/btcsuite/btcd/btcec"
 	"github.com/btcsuite/btcd/chaincfg"
@@ -140,6 +144,12 @@ func (km *KeyManager) GetMasterKey() (*bip32.Key, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	keyOneLevelDown, err := key.NewChildKey(0)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Println("One level down: %s", keyOneLevelDown)
 
 	km.setKey(path, key)
 
@@ -314,6 +324,57 @@ func GenerateFromBytes(prvKey *btcec.PrivateKey, compress bool) (wif, address, s
 	return wif, address, segwitBech32, segwitNested, nil
 }
 
+type Utxo struct {
+	Txid   string
+	Vout   int
+	Status UtxoStatus
+	Value  int
+}
+
+type UtxoStatus struct {
+	Confirmed    bool
+	Block_height int
+	Block_hash   string
+	Block_time   int
+}
+
+func LoadUtxos(address string) []Utxo {
+	url := "https://bitcoin.relai.ch/address/" + address + "/utxo"
+
+	spaceClient := http.Client{
+		Timeout: time.Second * 2, // Timeout after 2 seconds
+	}
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	req.Header.Set("User-Agent", "spacecount-tutorial")
+
+	res, getErr := spaceClient.Do(req)
+	if getErr != nil {
+		log.Fatal(getErr)
+	}
+
+	if res.Body != nil {
+		defer res.Body.Close()
+	}
+
+	body, readErr := ioutil.ReadAll(res.Body)
+	if readErr != nil {
+		log.Fatal(readErr)
+	}
+
+	var utxos []Utxo
+	jsonErr := json.Unmarshal([]byte(body), &utxos)
+	if jsonErr != nil {
+		log.Fatal(jsonErr)
+	}
+
+	return utxos
+}
+
 func main() {
 	// BIP39 MNEMONIC
 	passphrase := "chooseYourPassword"
@@ -328,7 +389,7 @@ func main() {
 	fmt.Printf("%-18s %x\n", "BIP39 Seed:", km.GetSeed())     // Only for the record. Not needed for Relai's purposes
 	fmt.Printf("%-18s %s\n", "BIP39 Passphrase:", passphrase) // Only for the record. Not needed for Relai's purposes
 
-	fmt.Println("\nADDRESSES FOR DEPOSITS FROM EXTERNAL WALLETS (EXCHANGES, USERS)")
+	fmt.Println("\nADDRESSES FOR DEPOSITS FROM EXCHANGE")
 	fmt.Println(strings.Repeat("-", 114))
 	fmt.Printf("%-18s %-42s %s\n", "Path(BIP84)", "SegWit(bech32)", "WIF(Wallet Import Format)")
 	fmt.Println(strings.Repeat("-", 114))
@@ -345,7 +406,7 @@ func main() {
 		fmt.Printf("%-18s %s %s\n", key.GetPath(), segwitBech32, wif)
 	}
 
-	fmt.Println("\nADDRESSES FOR CHANGE (MIGHT BE SENT TO COLD STORAGE, IN THAT CASE FORGET ABOUT IT)")
+	fmt.Println("\nADDRESSES FOR CHANGE, WHEN MONEY IS SENT TO EXCHANGE")
 	fmt.Println(strings.Repeat("-", 114))
 	fmt.Printf("%-18s %-42s %s\n", "Path(BIP84)", "SegWit(bech32)", "WIF(Wallet Import Format)")
 	fmt.Println(strings.Repeat("-", 114))
@@ -361,5 +422,84 @@ func main() {
 
 		fmt.Printf("%-18s %s %s\n", key.GetPath(), segwitBech32, wif)
 	}
+
+	fmt.Println("\nADDRESSES FOR DEPOSITS FROM USERS")
+	fmt.Println(strings.Repeat("-", 114))
+	fmt.Printf("%-18s %-42s %s\n", "Path(BIP84)", "SegWit(bech32)", "WIF(Wallet Import Format)")
+	fmt.Println(strings.Repeat("-", 114))
+	for i := 0; i < 10; i++ {
+		key, err := km.GetKey(PurposeBIP84, CoinTypeBTC, 1, 0, uint32(i))
+		if err != nil {
+			log.Fatal(err)
+		}
+		wif, _, segwitBech32, _, err := key.Encode(true)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		fmt.Printf("%-18s %s %s\n", key.GetPath(), segwitBech32, wif)
+	}
+
+	fmt.Println("\nADDRESSES FOR CHANGE, WHEN MONEY IS SENT TO USERS")
+	fmt.Println(strings.Repeat("-", 114))
+	fmt.Printf("%-18s %-42s %s\n", "Path(BIP84)", "SegWit(bech32)", "WIF(Wallet Import Format)")
+	fmt.Println(strings.Repeat("-", 114))
+	for i := 0; i < 10; i++ {
+		key, err := km.GetKey(PurposeBIP84, CoinTypeBTC, 1, 1, uint32(i))
+		if err != nil {
+			log.Fatal(err)
+		}
+		wif, _, segwitBech32, _, err := key.Encode(true)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		fmt.Printf("%-18s %s %s\n", key.GetPath(), segwitBech32, wif)
+	}
 	fmt.Println()
+
+	// =============================
+	// LOAD UTXOS
+	// =============================
+
+	address := "bc1qgdjqv0av3q56jvd82tkdjpy7gdp9ut8tlqmgrpmv24sq90ecnvqqjwvw97"
+	utxos := LoadUtxos(address)
+
+	fmt.Println("\nGATHER UTXOs FROM BITCOIN.RELAI.CH")
+	// Print entire unmarshaled JSON
+	fmt.Printf("\nUnmarshaled:\n%v\n", utxos)
+
+	fmt.Printf("\nNicely put sample UTXO:")
+	fmt.Printf("\nTransaction id = %s", utxos[0].Txid)
+	fmt.Printf("\nIndex of the output within the transaction = %d", utxos[0].Vout)
+	fmt.Printf("\nAmount of Satoshis = %d", utxos[0].Value)
+	fmt.Printf("\nTransaction is confirmed = %t", utxos[0].Status.Confirmed)
+	fmt.Printf("\nConfirmed at block = %d", utxos[0].Status.Block_height)
+	fmt.Printf("\nTime the block was mined = %d %s", utxos[0].Status.Block_time, "(not interesting for Relai's purposes)")
+	fmt.Printf("\nHash of the block = %s %s", utxos[0].Status.Block_hash, "(not interesting for Relai's purposes)")
+	fmt.Println("\n")
+
+	// =============================
+	// LOAD UTXOS FOR RELAI WALLET
+	// =============================
+
+	fmt.Println("\nUTXOs for Relai wallet (obviously, there are none)")
+	fmt.Println(strings.Repeat("-", 79))
+	fmt.Printf("%-18s %-44s %s\n", "Path(BIP84)", "SegWit(bech32)", "Amount of UTXOs")
+	fmt.Println(strings.Repeat("-", 79))
+	for i := 0; i < 10; i++ {
+		key, err := km.GetKey(PurposeBIP84, CoinTypeBTC, 0, 0, uint32(i))
+		if err != nil {
+			log.Fatal(err)
+		}
+		_, _, segwitBech32, _, err := key.Encode(true)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		utxos := LoadUtxos(segwitBech32)
+
+		fmt.Printf("%-18s %s \t%d\n", key.GetPath(), segwitBech32, len(utxos))
+	}
 }
+
