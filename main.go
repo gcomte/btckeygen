@@ -12,7 +12,6 @@ import (
 
 	"github.com/btcsuite/btcd/btcec"
 	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcutil"
 	"github.com/tyler-smith/go-bip32"
 	"github.com/tyler-smith/go-bip39"
@@ -60,7 +59,7 @@ type Key struct {
 	bip32Key *bip32.Key
 }
 
-func (k *Key) Encode(compress bool) (wif, address, segwitBech32, segwitNested string, err error) {
+func (k *Key) Encode(compress bool) (wif, address string, err error) {
 	prvKey, _ := btcec.PrivKeyFromBytes(btcec.S256(), k.bip32Key.Key)
 	return GenerateFromBytes(prvKey, compress)
 }
@@ -275,53 +274,32 @@ func (km *KeyManager) GetKey(purpose, coinType, account, change, index uint32) (
 	return &Key{path: path, bip32Key: key}, nil
 }
 
-func Generate(compress bool) (wif, address, segwitBech32, segwitNested string, err error) {
+func Generate(compress bool) (wif, address string, err error) {
 	prvKey, err := btcec.NewPrivateKey(btcec.S256())
 	if err != nil {
-		return "", "", "", "", err
+		return "", "", err
 	}
 	return GenerateFromBytes(prvKey, compress)
 }
 
-func GenerateFromBytes(prvKey *btcec.PrivateKey, compress bool) (wif, address, segwitBech32, segwitNested string, err error) {
+func GenerateFromBytes(prvKey *btcec.PrivateKey, compress bool) (wif, address string, err error) {
 	// generate the wif(wallet import format) string
 	btcwif, err := btcutil.NewWIF(prvKey, &chaincfg.MainNetParams, compress)
 	if err != nil {
-		return "", "", "", "", err
+		return "", "", err
 	}
 	wif = btcwif.String()
 
-	// generate a normal p2pkh address
-	serializedPubKey := btcwif.SerializePubKey()
-	addressPubKey, err := btcutil.NewAddressPubKey(serializedPubKey, &chaincfg.MainNetParams)
-	if err != nil {
-		return "", "", "", "", err
-	}
-	address = addressPubKey.EncodeAddress()
-
 	// generate a normal p2wkh address from the pubkey hash
+	serializedPubKey := btcwif.SerializePubKey()
 	witnessProg := btcutil.Hash160(serializedPubKey)
 	addressWitnessPubKeyHash, err := btcutil.NewAddressWitnessPubKeyHash(witnessProg, &chaincfg.MainNetParams)
 	if err != nil {
-		return "", "", "", "", err
+		return "", "", err
 	}
-	segwitBech32 = addressWitnessPubKeyHash.EncodeAddress()
+	address = addressWitnessPubKeyHash.EncodeAddress()
 
-	// generate an address which is
-	// backwards compatible to Bitcoin nodes running 0.6.0 onwards, but
-	// allows us to take advantage of segwit's scripting improvments,
-	// and malleability fixes.
-	serializedScript, err := txscript.PayToAddrScript(addressWitnessPubKeyHash)
-	if err != nil {
-		return "", "", "", "", err
-	}
-	addressScriptHash, err := btcutil.NewAddressScriptHash(serializedScript, &chaincfg.MainNetParams)
-	if err != nil {
-		return "", "", "", "", err
-	}
-	segwitNested = addressScriptHash.EncodeAddress()
-
-	return wif, address, segwitBech32, segwitNested, nil
+	return wif, address, nil
 }
 
 type Utxo struct {
@@ -398,12 +376,12 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		wif, _, segwitBech32, _, err := key.Encode(true)
+		wif, address, err := key.Encode(true)
 		if err != nil {
 			log.Fatal(err)
 		}
 
-		fmt.Printf("%-18s %s %s\n", key.GetPath(), segwitBech32, wif)
+		fmt.Printf("%-18s %s %s\n", key.GetPath(), address, wif)
 	}
 
 	fmt.Println("\nADDRESSES FOR CHANGE, WHEN MONEY IS SENT TO EXCHANGE")
@@ -415,12 +393,12 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		wif, _, segwitBech32, _, err := key.Encode(true)
+		wif, address, err := key.Encode(true)
 		if err != nil {
 			log.Fatal(err)
 		}
 
-		fmt.Printf("%-18s %s %s\n", key.GetPath(), segwitBech32, wif)
+		fmt.Printf("%-18s %s %s\n", key.GetPath(), address, wif)
 	}
 
 	fmt.Println("\nADDRESSES FOR DEPOSITS FROM USERS")
@@ -432,12 +410,12 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		wif, _, segwitBech32, _, err := key.Encode(true)
+		wif, address, err := key.Encode(true)
 		if err != nil {
 			log.Fatal(err)
 		}
 
-		fmt.Printf("%-18s %s %s\n", key.GetPath(), segwitBech32, wif)
+		fmt.Printf("%-18s %s %s\n", key.GetPath(), address, wif)
 	}
 
 	fmt.Println("\nADDRESSES FOR CHANGE, WHEN MONEY IS SENT TO USERS")
@@ -449,12 +427,12 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		wif, _, segwitBech32, _, err := key.Encode(true)
+		wif, address, err := key.Encode(true)
 		if err != nil {
 			log.Fatal(err)
 		}
 
-		fmt.Printf("%-18s %s %s\n", key.GetPath(), segwitBech32, wif)
+		fmt.Printf("%-18s %s %s\n", key.GetPath(), address, wif)
 	}
 	fmt.Println()
 
@@ -492,14 +470,14 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		_, _, segwitBech32, _, err := key.Encode(true)
+		_, address, err := key.Encode(true)
 		if err != nil {
 			log.Fatal(err)
 		}
 
-		utxos := LoadUtxos(segwitBech32)
+		utxos := LoadUtxos(address)
 
-		fmt.Printf("%-18s %s \t%d\n", key.GetPath(), segwitBech32, len(utxos))
+		fmt.Printf("%-18s %s \t%d\n", key.GetPath(), address, len(utxos))
 	}
 }
 
