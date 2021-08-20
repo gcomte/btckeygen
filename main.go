@@ -44,10 +44,8 @@ const (
 type CoinType = uint32
 
 const (
-	CoinTypeBTC CoinType = 0x80000000
-	CoinTypeLTC CoinType = 0x80000002
-	CoinTypeETH CoinType = 0x8000003c
-	CoinTypeEOS CoinType = 0x800000c2
+	CoinTypeBTC CoinType = 0x80000000  // MAINNET
+	CoinTypeTBTC CoinType = 0x80000001 // TESTNET
 )
 
 const (
