@@ -70,12 +70,20 @@ func (k *Key) GetPath() string {
 	return k.path
 }
 
+// Derivation with Mnemonic
 type KeyManager struct {
 	mnemonic   string
 	passphrase string
 	keys       map[string]*bip32.Key
 	mux        sync.Mutex
 }
+
+// Derivation with XPRIV
+type KeyMgr struct {
+        keys       map[string]*bip32.Key
+        mux        sync.Mutex
+}
+
 
 // NewKeyManager return new key manager
 // bitSize has to be a multiple 32 and be within the inclusive range of {128, 256}
@@ -114,6 +122,8 @@ func (km *KeyManager) GetSeed() []byte {
 	return bip39.NewSeed(km.GetMnemonic(), km.GetPassphrase())
 }
 
+
+// Derivation from Mnemonic
 func (km *KeyManager) getKey(path string) (*bip32.Key, bool) {
 	km.mux.Lock()
 	defer km.mux.Unlock()
@@ -122,11 +132,29 @@ func (km *KeyManager) getKey(path string) (*bip32.Key, bool) {
 	return key, ok
 }
 
+// Derivation from XPRIV
+func (km *KeyMgr) getKey(path string) (*bip32.Key, bool) {
+        km.mux.Lock()
+        defer km.mux.Unlock()
+
+        key, ok := km.keys[path]
+        return key, ok
+}
+
+// Derivation from Mnemonic
 func (km *KeyManager) setKey(path string, key *bip32.Key) {
 	km.mux.Lock()
 	defer km.mux.Unlock()
 
 	km.keys[path] = key
+}
+
+// Derivation from XPRIV
+func (km *KeyMgr) setKey(path string, key *bip32.Key) {
+        km.mux.Lock()
+        defer km.mux.Unlock()
+
+        km.keys[path] = key
 }
 
 func (km *KeyManager) GetMasterKey() (*bip32.Key, error) {
@@ -142,11 +170,9 @@ func (km *KeyManager) GetMasterKey() (*bip32.Key, error) {
 		return nil, err
 	}
 
-	keyOneLevelDown, err := key.NewChildKey(0)
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println("One level down: %s", keyOneLevelDown)
 
 	km.setKey(path, key)
 
@@ -220,6 +246,74 @@ func (km *KeyManager) GetAccountKey(purpose, coinType, account uint32) (*bip32.K
 	km.setKey(path, key)
 
 	return key, nil
+}
+
+func (km *KeyMgr) GetAccountKeyFromXpriv(xpriv string) (*bip32.Key, error) {
+        path := fmt.Sprintf(`XPRIV`)
+
+        key, ok := km.getKey(path)
+        if ok {
+                return key, nil
+        }
+
+        key, err := bip32.B58Deserialize(xpriv)
+        if err != nil {
+                return nil, err
+        }
+
+        km.setKey(path, key)
+
+        return key, nil
+}
+
+// GetChangeKey ...
+// https://github.com/bitcoin/bips/blob/master/bip-0044.mediawiki#change
+// change constant 0 is used for external chain
+// change constant 1 is used for internal chain (also known as change addresses)
+func (km *KeyMgr) GetChangeKeyFromXpriv(xpriv string, change uint32) (*bip32.Key, error) {
+	path := fmt.Sprintf(`XPRIV/%d`, change)
+
+	key, ok := km.getKey(path)
+	if ok {
+		return key, nil
+	}
+
+	parent, err := km.GetAccountKeyFromXpriv(xpriv)
+	if err != nil {
+		return nil, err
+	}
+
+	key, err = parent.NewChildKey(change)
+	if err != nil {
+		return nil, err
+	}
+
+	km.setKey(path, key)
+
+	return key, nil
+}
+
+func (km *KeyMgr) GetKeyFromXpriv(xpriv string, change, index uint32) (*Key, error) {
+	path := fmt.Sprintf(`XPRIV/%d/%d`, change, index)
+
+	key, ok := km.getKey(path)
+	if ok {
+		return &Key{path: path, bip32Key: key}, nil
+	}
+
+	parent, err := km.GetChangeKeyFromXpriv(xpriv, change)
+	if err != nil {
+		return nil, err
+	}
+
+	key, err = parent.NewChildKey(index)
+	if err != nil {
+		return nil, err
+	}
+
+	km.setKey(path, key)
+
+	return &Key{path: path, bip32Key: key}, nil
 }
 
 // GetChangeKey ...
@@ -351,7 +445,51 @@ func LoadUtxos(address string) []Utxo {
 	return utxos
 }
 
+// We don't host any Service for Bitcoin TESTNET at Relai.
+// Therefore, we are going to use the API at blockstream.info instead.
+// The interface is the same, it's just the URL that changes.
+
+func LoadTestnetUtxos(address string) []Utxo {
+        url := "https://blockstream.info/testnet/api/address/" + address + "/utxo"
+
+        spaceClient := http.Client{
+                Timeout: time.Second * 2, // Timeout after 2 seconds
+        }
+
+        req, err := http.NewRequest(http.MethodGet, url, nil)
+        if err != nil {
+                log.Fatal(err)
+        }
+
+        req.Header.Set("User-Agent", "spacecount-tutorial")
+
+        res, getErr := spaceClient.Do(req)
+        if getErr != nil {
+                log.Fatal(getErr)
+        }
+
+        if res.Body != nil {
+                defer res.Body.Close()
+        }
+
+        body, readErr := ioutil.ReadAll(res.Body)
+        if readErr != nil {
+                log.Fatal(readErr)
+        }
+
+        var utxos []Utxo
+        jsonErr := json.Unmarshal([]byte(body), &utxos)
+        if jsonErr != nil {
+                log.Fatal(jsonErr)
+        }
+
+        return utxos
+}
+
 func main() {
+
+	/* Starting from MNEMONIC
+
 	// BIP39 MNEMONIC
 	passphrase := "chooseYourPassword"
 	km, err := NewKeyManager(256, passphrase, "")
@@ -434,6 +572,52 @@ func main() {
 	}
 	fmt.Println()
 
+	*/
+
+	/* Starting from XPRIV */
+
+	xpriv := "xprv9zB1sxBiWZ46H1TqBhGNmnZ8BSCVxs5ovA2guN1QydoVD3JhvnH5T3KYQeQrnDEJxSSb6aPFHfCEqJWha2yXx48b5ZhfV3n3NRnvCNdHL49"
+
+	km := &KeyMgr{
+                keys:       make(map[string]*bip32.Key, 0),
+        }
+
+	fmt.Println("\nADDRESSES FOR DEPOSITS")
+	fmt.Println(strings.Repeat("-", 114))
+	fmt.Printf("%-18s %-42s %s\n", "Path(BIP84)", "SegWit(bech32)", "WIF(Wallet Import Format)")
+	fmt.Println(strings.Repeat("-", 114))
+	for i := 0; i < 10; i++ {
+		key, err := km.GetKeyFromXpriv(xpriv, 0, uint32(i))
+		if err != nil {
+			log.Fatal(err)
+		}
+		wif, address, err := key.Encode(true)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		fmt.Printf("%-18s %s %s\n", key.GetPath(), address, wif)
+	}
+
+	fmt.Println("\nADDRESSES FOR CHANGE")
+        fmt.Println(strings.Repeat("-", 114))
+        fmt.Printf("%-18s %-42s %s\n", "Path(BIP84)", "SegWit(bech32)", "WIF(Wallet Import Format)")
+        fmt.Println(strings.Repeat("-", 114))
+        for i := 0; i < 10; i++ {
+                key, err := km.GetKeyFromXpriv(xpriv, 1, uint32(i))
+                if err != nil {
+                        log.Fatal(err)
+                }
+                wif, address, err := key.Encode(true)
+                if err != nil {
+                        log.Fatal(err)
+                }
+
+                fmt.Printf("%-18s %s %s\n", key.GetPath(), address, wif)
+        }
+	
+	fmt.Println()
+
 	// =============================
 	// LOAD UTXOS
 	// =============================
@@ -464,7 +648,13 @@ func main() {
 	fmt.Printf("%-18s %-44s %s\n", "Path(BIP84)", "SegWit(bech32)", "Amount of UTXOs")
 	fmt.Println(strings.Repeat("-", 79))
 	for i := 0; i < 10; i++ {
-		key, err := km.GetKey(PurposeBIP84, CoinTypeBTC, 0, 0, uint32(i))
+		
+		// Derivation from Mnemonic
+		// key, err := km.GetKey(PurposeBIP84, CoinTypeBTC, 0, 0, uint32(i))
+		
+		// Derivation from XPRIV
+		key, err := km.GetKeyFromXpriv(xpriv, 0, uint32(i))
+
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -477,5 +667,5 @@ func main() {
 
 		fmt.Printf("%-18s %s \t%d\n", key.GetPath(), address, len(utxos))
 	}
-}
 
+}
