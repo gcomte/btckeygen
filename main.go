@@ -62,6 +62,11 @@ func (k *Key) Encode(compress bool) (wif, address string, err error) {
 	return GenerateFromBytes(prvKey, compress)
 }
 
+func (k *Key) EncodePub(compress bool) (address string, err error) {
+	pubKey, err := btcec.ParsePubKey(k.bip32Key.Key, btcec.S256())
+        return GeneratePubFromBytes(pubKey, compress)
+}
+
 // https://github.com/bitcoin/bips/blob/master/bip-0044.mediawiki
 // bip44 define the following 5 levels in BIP32 path:
 // m / purpose' / coin_type' / account' / change / address_index
@@ -266,6 +271,26 @@ func (km *KeyMgr) GetAccountKeyFromXpriv(xpriv string) (*bip32.Key, error) {
         return key, nil
 }
 
+
+func (km *KeyMgr) GetAccountKeyFromXpub(xpub string) (*bip32.Key, error) {
+        path := fmt.Sprintf(`XPUB`)
+
+        key, ok := km.getKey(path)
+        if ok {
+                return key, nil
+        }
+
+        key, err := bip32.B58Deserialize(xpub)
+        if err != nil {
+                return nil, err
+        }
+
+        km.setKey(path, key)
+
+        return key, nil
+}
+
+
 // GetChangeKey ...
 // https://github.com/bitcoin/bips/blob/master/bip-0044.mediawiki#change
 // change constant 0 is used for external chain
@@ -293,6 +318,34 @@ func (km *KeyMgr) GetChangeKeyFromXpriv(xpriv string, change uint32) (*bip32.Key
 	return key, nil
 }
 
+// GetChangeKey ...
+// https://github.com/bitcoin/bips/blob/master/bip-0044.mediawiki#change
+// change constant 0 is used for external chain
+// change constant 1 is used for internal chain (also known as change addresses)
+func (km *KeyMgr) GetChangeKeyFromXpub(xpub string, change uint32) (*bip32.Key, error) {
+        path := fmt.Sprintf(`XPUB/%d`, change)
+
+        key, ok := km.getKey(path)
+        if ok {
+                return key, nil
+        }
+
+        parent, err := km.GetAccountKeyFromXpub(xpub)
+        if err != nil {
+                return nil, err
+        }
+
+        key, err = parent.NewChildKey(change)
+        if err != nil {
+                return nil, err
+        }
+
+        km.setKey(path, key)
+
+        return key, nil
+}
+
+
 func (km *KeyMgr) GetKeyFromXpriv(xpriv string, change, index uint32) (*Key, error) {
 	path := fmt.Sprintf(`XPRIV/%d/%d`, change, index)
 
@@ -314,6 +367,29 @@ func (km *KeyMgr) GetKeyFromXpriv(xpriv string, change, index uint32) (*Key, err
 	km.setKey(path, key)
 
 	return &Key{path: path, bip32Key: key}, nil
+}
+
+func (km *KeyMgr) GetKeyFromXpub(xpub string, change, index uint32) (*Key, error) {
+        path := fmt.Sprintf(`XPUB/%d/%d`, change, index)
+
+        key, ok := km.getKey(path)
+        if ok {
+                return &Key{path: path, bip32Key: key}, nil
+        }
+
+        parent, err := km.GetChangeKeyFromXpub(xpub, change)
+        if err != nil {
+                return nil, err
+        }
+
+        key, err = parent.NewChildKey(index)
+        if err != nil {
+                return nil, err
+        }
+
+        km.setKey(path, key)
+
+        return &Key{path: path, bip32Key: key}, nil
 }
 
 // GetChangeKey ...
@@ -392,6 +468,19 @@ func GenerateFromBytes(prvKey *btcec.PrivateKey, compress bool) (wif, address st
 	address = addressWitnessPubKeyHash.EncodeAddress()
 
 	return wif, address, nil
+}
+
+func GeneratePubFromBytes(pubKey *btcec.PublicKey, compress bool) (address string, err error) {
+	// generate a normal p2wkh address from the pubkey hash
+        serializedPubKey := pubKey.SerializeCompressed()
+        witnessProg := btcutil.Hash160(serializedPubKey)
+        addressWitnessPubKeyHash, err := btcutil.NewAddressWitnessPubKeyHash(witnessProg, &chaincfg.MainNetParams)
+        if err != nil {
+                return "", err
+        }
+        address = addressWitnessPubKeyHash.EncodeAddress()
+
+        return address, nil
 }
 
 type Utxo struct {
@@ -486,6 +575,7 @@ func LoadTestnetUtxos(address string) []Utxo {
         return utxos
 }
 
+
 func main() {
 
 	/* Starting from MNEMONIC
@@ -574,12 +664,16 @@ func main() {
 
 	*/
 
-	/* Starting from XPRIV */
+	/* Starting from XPRIV/XPUB key pair */
 
-	xpriv := "xprv9zB1sxBiWZ46H1TqBhGNmnZ8BSCVxs5ovA2guN1QydoVD3JhvnH5T3KYQeQrnDEJxSSb6aPFHfCEqJWha2yXx48b5ZhfV3n3NRnvCNdHL49"
+	// account xpub/xpriv from mnemonic "afford invest lady negative mango left hurdle three tragic short outside gentle dawn combine action obvious ready move dune reduce puppy nature choice diagram", password "chooseYourPassword", path "m/84'/0'/0'"
+	xpriv := "zprvAcwXfubDhdV82hUAQeZcHgPmgvv9UkSx6nbEbz1YhkGtUZKiL8oDHqDj5Kov4mNRmEe4d6nzfq2jAzbByfdhoLAiHLZRXRZ2mPukWypCm1q" 
+	xpub := "zpub6qvt5R87Y13RFBYdWg6cepLWExkdtDAoU1WqQNRAG5osMMersg7TqdYCvb5X734c8TpvAAGpk8xsENze5UcGuu4dCv58d3gioyNB9Pb8hiX"
+	// ^ this is a 'key pair'. The xpub and xpriv belong to eachother. The xpub can be derived from the xpriv. The xpriv *cannot* be derived rom the xpub.
+	// Both xpriv and xpub derive the same addresses, given the same derivation path, but private keys can only be derived from the xpriv.
 
 	km := &KeyMgr{
-                keys:       make(map[string]*bip32.Key, 0),
+                keys: make(map[string]*bip32.Key, 0),
         }
 
 	fmt.Println("\nADDRESSES FOR DEPOSITS")
@@ -615,7 +709,25 @@ func main() {
 
                 fmt.Printf("%-18s %s %s\n", key.GetPath(), address, wif)
         }
-	
+
+        fmt.Println("\nDEPOSIT ADDRESSES DERIVED FROM XPUB")
+        fmt.Println(strings.Repeat("-", 114))
+        fmt.Printf("%-18s %-42s %s\n", "Path(BIP84)", "SegWit(bech32)", "WIF(Wallet Import Format)")
+        fmt.Println(strings.Repeat("-", 114))
+        for i := 0; i < 10; i++ {
+                key, err := km.GetKeyFromXpub(xpub, 0, uint32(i))
+
+                if err != nil {
+                        log.Fatal(err)
+                }
+                address, err := key.EncodePub(true)
+                if err != nil {
+                        log.Fatal(err)
+                }
+
+                fmt.Printf("%-18s %s %s\n", key.GetPath(), address, "[can't be derived]")
+        }
+
 	fmt.Println()
 
 	// =============================
