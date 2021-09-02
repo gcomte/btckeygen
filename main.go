@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -12,7 +15,10 @@ import (
 
 	"github.com/btcsuite/btcd/btcec"
 	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/tyler-smith/go-bip32"
 	"github.com/tyler-smith/go-bip39"
 )
@@ -537,7 +543,6 @@ func LoadUtxos(address string) []Utxo {
 // We don't host any Service for Bitcoin TESTNET at Relai.
 // Therefore, we are going to use the API at blockstream.info instead.
 // The interface is the same, it's just the URL that changes.
-
 func LoadTestnetUtxos(address string) []Utxo {
         url := "https://blockstream.info/testnet/api/address/" + address + "/utxo"
 
@@ -575,6 +580,203 @@ func LoadTestnetUtxos(address string) []Utxo {
         return utxos
 }
 
+// ========================================
+// CRAFTING TRANSACTIONS (helper functions)
+// ========================================
+
+// Pass UTXO if you want to RBF, otherwise just pass nil (function will also return the used UTXO, for RBF purposes)
+func CreateRawTx(utxo Utxo, from string, to string, amountInSats int, feeInSats int) (*wire.MsgTx, string, error) {
+	spendAmount := amountInSats + feeInSats
+
+	changeAmount := utxo.Value - spendAmount
+	if changeAmount < 0 {
+		fmt.Printf("Utxo contains %d sats. Trying to spend %d sats and %d sats in fees is not possible.\n", utxo.Value, amountInSats, feeInSats)
+                return nil, "", errors.New("UTXO doesn't contain enough coins")
+	}
+
+	// create new empty transaction
+	tx := wire.NewMsgTx(wire.TxVersion)
+	
+	// create single txIn
+	hash, err := chainhash.NewHashFromStr(utxo.Txid)
+	if err != nil {
+		fmt.Printf("could not get hash from transaction ID: %v", err)
+		return nil, "", err
+	}
+
+	outPoint := wire.NewOutPoint(hash, uint32(utxo.Vout))
+	txIn := wire.NewTxIn(outPoint, nil, nil)
+	txIn.Sequence = 4294967293 // Signal BIP 125 Replace-By-Fee
+	tx.AddTxIn(txIn)
+	fmt.Printf("TxID for TxIn: %s, index %d \n", utxo.Txid, utxo.Vout)
+
+	// create TxOut
+	// In the case of Relai, we'll often have to add MULTIPLE txOuts.
+	rcvScript := GetTxScript(to)
+	txOut := wire.NewTxOut(int64(amountInSats), rcvScript)
+	tx.AddTxOut(txOut)
+  
+	// create TxOut for change address, in this case, change address is sender itself
+	if changeAmount > 0 {
+		// return change BTC to its own address
+		rcvChangeAddressScript := GetTxScript(from) // todo other change address
+		txOut := wire.NewTxOut(int64(changeAmount), rcvChangeAddressScript)
+		tx.AddTxOut(txOut)
+	}
+
+	rcvScriptHex := hex.EncodeToString(rcvScript)
+
+	return tx, rcvScriptHex, nil
+}
+
+func JsonEncodeTransaction(tx *wire.MsgTx) (string, error) {
+	encodedTx, err := json.Marshal(tx)
+        if err != nil {
+                return "", err
+        }
+
+        return string(encodedTx), nil
+}
+
+func GetTxScript(addressStr string) []byte {
+	// Parse the address to send the coins to into a btcutil.Address
+        // which is useful to ensure the accuracy of the address and determine
+        // the address type.  It is also required for the upcoming call to
+        // PayToAddrScript.
+	address, err := btcutil.DecodeAddress(addressStr, &chaincfg.TestNet3Params) // todo: change to &chaincfg.MainNetParams for MAINNET
+        if err != nil {
+                fmt.Println(err)
+                return nil
+        }
+
+        // Create a public key script that pays to the address.
+        script, err := txscript.PayToAddrScript(address)
+        if err != nil {
+                fmt.Println(err)
+                return nil
+        }
+        fmt.Printf("Script Hex: %x\n", script)
+
+        disasm, err := txscript.DisasmString(script)
+        if err != nil {
+                fmt.Println(err)
+                return nil
+        }
+        fmt.Println("Script Disassembly:", disasm)
+
+	return script
+}
+
+func SignTx(privKey string, pkScript string, redeemTx *wire.MsgTx, availableAmtInSats int) (string, int, error) {
+
+   wif, err := btcutil.DecodeWIF(privKey)
+   if err != nil {
+      return "", 0, err
+   }
+
+   fmt.Println("privkey [wif]: ", wif)
+   fmt.Println("wif.PrivKey: ", wif.PrivKey)
+
+   sourcePKScript, err := hex.DecodeString(pkScript)
+   if err != nil {
+      return "", 0, err
+   }
+
+   // WitnessSignature(tx *wire.MsgTx, sigHashes *TxSigHashes, idx int, amt int64, subscript []byte, hashType SigHashType, privKey *btcec.PrivateKey, compress bool)
+   signature, err := txscript.WitnessSignature(redeemTx, txscript.NewTxSigHashes(redeemTx), 0, int64(availableAmtInSats), sourcePKScript, txscript.SigHashAll, wif.PrivKey, true)
+   if err != nil {
+      return "", 0, err
+   }
+
+   // since there is only one input, and want to add
+   // signature to it use 0 as index
+//   redeemTx.TxIn[0].SignatureScript = signature
+   redeemTx.TxIn[0].Witness = signature
+
+   var signedTx bytes.Buffer
+   redeemTx.Serialize(&signedTx)
+
+   signedTxBytes := signedTx.Bytes()
+   hexSignedTx := hex.EncodeToString(signedTxBytes)
+
+   return hexSignedTx, len(signedTxBytes), nil
+}
+
+// We don't host any Service for Bitcoin TESTNET at Relai.
+// Therefore, we are going to use the API at blockstream.info instead.
+// The interface is the same, it's just the URL that changes.
+func BroadcastTx(txHex string) (string) {
+   // MAINNET --> url := "https://bitcoin.relai.ch/tx"
+    url := "https://blockstream.info/testnet/api/tx"
+
+    fmt.Printf("\nBroadcasting transaction to %s ... \n", url)
+
+    body := []byte(txHex)
+    req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
+
+    client := &http.Client{}
+    resp, err := client.Do(req)
+    if err != nil {
+        panic(err)
+    }
+    defer resp.Body.Close()
+
+    fmt.Println("response Status:", resp.Status)
+    // fmt.Println("response Headers:", resp.Header)
+    recvBody, _ := ioutil.ReadAll(resp.Body)
+    txid := string(recvBody)
+    fmt.Println("response Body [Transaction ID if request was successful]:", txid)
+
+    return txid
+}
+
+type TxStatus struct {
+        Confirmed    bool
+        BlockHeight  int
+        BlockHash    string
+        BlockTime    int
+}
+
+// We don't host any Service for Bitcoin TESTNET at Relai.
+// Therefore, we are going to use the API at blockstream.info instead.
+// The interface is the same, it's just the URL that changes.
+func CheckTxInBlock(txid string) (bool) {
+	// MAINNET --> url := "https://bitcoin.relai.ch/tx" + txid + "/status"
+	url := "https://blockstream.info/testnet/api/tx/" + txid + "/status"
+
+	spaceClient := http.Client{
+                Timeout: time.Second * 2, // Timeout after 2 seconds
+        }
+
+        req, err := http.NewRequest(http.MethodGet, url, nil)
+        if err != nil {
+                log.Fatal(err)
+        }
+
+        req.Header.Set("User-Agent", "spacecount-tutorial")
+
+        res, getErr := spaceClient.Do(req)
+        if getErr != nil {
+                log.Fatal(getErr)
+        }
+
+        if res.Body != nil {
+                defer res.Body.Close()
+        }
+
+        body, readErr := ioutil.ReadAll(res.Body)
+        if readErr != nil {
+                log.Fatal(readErr)
+        }
+
+        var txStatus TxStatus 
+        jsonErr := json.Unmarshal([]byte(body), &txStatus)
+        if jsonErr != nil {
+                log.Fatal(jsonErr)
+        }
+
+        return txStatus.Confirmed
+}
 
 func main() {
 
@@ -780,4 +982,98 @@ func main() {
 		fmt.Printf("%-18s %s \t%d\n", key.GetPath(), address, len(utxos))
 	}
 
+	// =====================
+        // CRAFTING TRANSACTIONS
+        // =====================
+
+	fmt.Println("\nCRAFT A TRANSACTION")
+
+	sendingAddress := "tb1qx03jk6rwpxkm0dy8mdx6yk06mj0a5m6q7ws5p6"
+	sendingPrivKey := "cPhJw9tQuE7Y61MCm8NJRgEjUwuV9mPL2SD3gJbRHn4maunEQKCW"
+	receivingAddress := "tb1qx03jk6rwpxkm0dy8mdx6yk06mj0a5m6q7ws5p6"
+	
+	amtInSats := 1234567
+        feeInSats := 200
+	totalAmtInSats := amtInSats + feeInSats
+
+	// For this demo, let's get read the amtInSats (value of UTXO in sats) from the TESTNET blockchain
+	testnetUtxos := LoadTestnetUtxos(sendingAddress)
+	if len(testnetUtxos) == 0 {
+                fmt.Printf("Cannot find any UTXO for address %s.\n", sendingAddress)
+                log.Fatal(errors.New("No UTXOs found"))
+        }
+        totalAmtInSats = testnetUtxos[0].Value
+	amtInSats = totalAmtInSats - feeInSats
+
+	fmt.Printf("Lookup UTXOs for address: %s\n", sendingAddress)
+
+        utxos = LoadTestnetUtxos(sendingAddress)
+
+        if len(utxos) == 0 {
+                fmt.Printf("Cannot find any UTXO for address %s.\n", sendingAddress)
+                log.Fatal(errors.New("No UTXOs found"))
+        }
+
+	rawTx, pkScript, err := CreateRawTx(utxos[0], sendingAddress, receivingAddress, amtInSats, feeInSats)
+	
+	if err != nil {
+        	log.Fatal(err)
+        }
+
+	jsonEncodedRawTx, _ := JsonEncodeTransaction(rawTx)
+	fmt.Printf("\nRaw Transaction: %s\n", jsonEncodedRawTx)
+	fmt.Printf("\nPK Script: %s\n", pkScript)
+
+	// Signing
+	signedTx, txSize, _ := SignTx(sendingPrivKey, pkScript, rawTx, totalAmtInSats)
+	fmt.Printf("\nSigned Transaction [Hex]: %s", signedTx)
+	fmt.Printf("\nSigned Transaction Size: %d\n", txSize)
+
+	// Broadcasting
+	txid := BroadcastTx(signedTx)
+
+
+	// Replace-by-fee
+	minRelayFee := 1; // 1 is the default, leave it like that.
+
+	// Always remember rules 3-5 from https://github.com/bitcoin/bips/blob/master/bip-0125.mediawiki#implementation-details :
+	// 3) The replacement transaction pays an absolute fee of at least the sum paid by the original transactions.
+	// 4) The replacement transaction must also pay for its own bandwidth at or above the rate set by the node's minimum relay fee setting. For example, if the minimum relay fee is 1 satoshi/byte and the replacement transaction is 500 bytes total, then the replacement must pay a fee at least 500 satoshis higher than the sum of the originals.
+	// 5)The number of original transactions to be replaced and their descendant transactions which will be evicted from the mempool must not exceed a total of 100 transactions.
+
+
+	intervalBetweenRbfReplacementsSecs := 30
+
+	fmt.Printf("\n=============== RBF ===============\n")
+        fmt.Printf("Replacing tx with higher fee every %d seconds (RBF)\n", int(intervalBetweenRbfReplacementsSecs))
+        fmt.Printf("Original fee in sats: %d\n\n", feeInSats)
+        time.Sleep(time.Duration(intervalBetweenRbfReplacementsSecs) * time.Second)
+
+	// For the fun of it, let's fee-bump our tx every 30 seconds, until it is mined into a block. (Transaction may be replaced up to 100 times.)
+	for !CheckTxInBlock(txid) {
+
+		// Rule nr. 4
+		feeBumpAmt := txSize * minRelayFee
+		feeInSats = feeInSats + feeBumpAmt // minimal fee increase. Can always be more than that.
+		amtInSats = amtInSats - feeBumpAmt
+		// ^ Since we are paying more in fees the money we're paying more must be missing in another output.
+		// In this simple example transaction, we just shrink the amount the receiver of the transaction gets.
+		// In regular cases (and Relai's case too), you'd have a change address, which would shrink with rising transaction fees.
+
+		// Craft transaction again, but with higher fee:
+		rawTx, pkScript, err = CreateRawTx(utxos[0], sendingAddress, receivingAddress, amtInSats, feeInSats)
+		jsonEncodedRawTx, _ = JsonEncodeTransaction(rawTx)
+		signedTx, txSize, _ = SignTx(sendingPrivKey, pkScript, rawTx, totalAmtInSats)
+        	fmt.Printf("\nRBF Signed Transaction [Hex]: %s", signedTx)
+	        fmt.Printf("\nRBF Signed Transaction Size: %d\n", txSize)
+
+        	// Broadcasting
+	        txid = BroadcastTx(signedTx)
+
+		fmt.Printf("\nBroadcasted RBF transaction with paying %d sats in fees\n", feeInSats)
+
+		time.Sleep(time.Duration(intervalBetweenRbfReplacementsSecs) * time.Second)
+	}
+
+	fmt.Println("Transaction is now confirmed. Txid:", txid)
 }
