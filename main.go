@@ -780,7 +780,7 @@ func CheckTxInBlock(txid string) (bool) {
 
 func main() {
 
-	/* Starting from MNEMONIC
+	/* Starting from MNEMONIC */
 
 	// BIP39 MNEMONIC
 	passphrase := "chooseYourPassword"
@@ -794,6 +794,18 @@ func main() {
 	fmt.Printf("\n%-18s %s\n", "BIP39 Mnemonic:", km.GetMnemonic())
 	fmt.Printf("%-18s %x\n", "BIP39 Seed:", km.GetSeed())     // Only for the record. Not needed for Relai's purposes
 	fmt.Printf("%-18s %s\n", "BIP39 Passphrase:", passphrase) // Only for the record. Not needed for Relai's purposes
+
+	accountKey, err := km.GetAccountKey(PurposeBIP84, CoinTypeBTC, 0);
+        if err != nil {
+                log.Fatal(err)
+        }
+	accXpriv := accountKey.B58Serialize();
+	accXpub := accountKey.PublicKey()
+	fmt.Printf("%-18s %s\n", "Account XPRIV:", accXpriv)
+	fmt.Printf("%-18s %s\n", "Account XPUB:", accXpub)
+	fmt.Println("Reproduce this XPRIV/XPUB key pair on https://iancoleman.io/bip39/ :");
+        fmt.Println("Enter the mnemonic and password mentioned above. Under the title 'Derivation Path', use the tab 'BIP32'. Enter the following BIP32 Derviation Path: m/84'/0'/0'");
+        fmt.Printf("Then the 'BIP32 Extended Private Key' and the 'BIP32 Extended Public Key' should be equal to the XPRIV/XPUB mentioned above.\n\n");
 
 	fmt.Println("\nADDRESSES FOR DEPOSITS FROM EXCHANGE")
 	fmt.Println(strings.Repeat("-", 114))
@@ -864,7 +876,6 @@ func main() {
 	}
 	fmt.Println()
 
-	*/
 
 	/* Starting from XPRIV/XPUB key pair */
 
@@ -874,7 +885,7 @@ func main() {
 	// ^ this is a 'key pair'. The xpub and xpriv belong to eachother. The xpub can be derived from the xpriv. The xpriv *cannot* be derived rom the xpub.
 	// Both xpriv and xpub derive the same addresses, given the same derivation path, but private keys can only be derived from the xpriv.
 
-	km := &KeyMgr{
+	kmx := &KeyMgr{
                 keys: make(map[string]*bip32.Key, 0),
         }
 
@@ -883,7 +894,7 @@ func main() {
 	fmt.Printf("%-18s %-42s %s\n", "Path(BIP84)", "SegWit(bech32)", "WIF(Wallet Import Format)")
 	fmt.Println(strings.Repeat("-", 114))
 	for i := 0; i < 10; i++ {
-		key, err := km.GetKeyFromXpriv(xpriv, 0, uint32(i))
+		key, err := kmx.GetKeyFromXpriv(xpriv, 0, uint32(i))
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -900,7 +911,7 @@ func main() {
         fmt.Printf("%-18s %-42s %s\n", "Path(BIP84)", "SegWit(bech32)", "WIF(Wallet Import Format)")
         fmt.Println(strings.Repeat("-", 114))
         for i := 0; i < 10; i++ {
-                key, err := km.GetKeyFromXpriv(xpriv, 1, uint32(i))
+                key, err := kmx.GetKeyFromXpriv(xpriv, 1, uint32(i))
                 if err != nil {
                         log.Fatal(err)
                 }
@@ -917,7 +928,7 @@ func main() {
         fmt.Printf("%-18s %-42s %s\n", "Path(BIP84)", "SegWit(bech32)", "WIF(Wallet Import Format)")
         fmt.Println(strings.Repeat("-", 114))
         for i := 0; i < 10; i++ {
-                key, err := km.GetKeyFromXpub(xpub, 0, uint32(i))
+                key, err := kmx.GetKeyFromXpub(xpub, 0, uint32(i))
 
                 if err != nil {
                         log.Fatal(err)
@@ -967,7 +978,7 @@ func main() {
 		// key, err := km.GetKey(PurposeBIP84, CoinTypeBTC, 0, 0, uint32(i))
 		
 		// Derivation from XPRIV
-		key, err := km.GetKeyFromXpriv(xpriv, 0, uint32(i))
+		key, err := kmx.GetKeyFromXpriv(xpriv, 0, uint32(i))
 
 		if err != nil {
 			log.Fatal(err)
