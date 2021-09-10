@@ -584,14 +584,21 @@ func LoadTestnetUtxos(address string) []Utxo {
 // CRAFTING TRANSACTIONS (helper functions)
 // ========================================
 
-// Pass UTXO if you want to RBF, otherwise just pass nil (function will also return the used UTXO, for RBF purposes)
-func CreateRawTx(utxo Utxo, from string, to string, amountInSats int, feeInSats int) (*wire.MsgTx, string, error) {
-	spendAmount := amountInSats + feeInSats
+type Receiver struct {
+        Address   string
+        AmtInSats   int
+}
 
-	changeAmount := utxo.Value - spendAmount
-	if changeAmount < 0 {
-		fmt.Printf("Utxo contains %d sats. Trying to spend %d sats and %d sats in fees is not possible.\n", utxo.Value, amountInSats, feeInSats)
-                return nil, "", errors.New("UTXO doesn't contain enough coins")
+// Pass UTXO if you want to RBF, otherwise just pass nil (function will also return the used UTXO, for RBF purposes)
+func CreateRawTx(utxo Utxo, from string, receivers []Receiver, feeInSats int) (*wire.MsgTx, error) {
+	spendAmount := feeInSats
+	for _, receiver := range receivers {
+		spendAmount += receiver.AmtInSats
+	}
+
+	if utxo.Value < spendAmount {
+		fmt.Printf("Utxo contains %d sats. Trying to spend %d sats and %d sats in fees is not possible.\n", utxo.Value, spendAmount, feeInSats)
+                return nil, errors.New("UTXO doesn't contain enough coins")
 	}
 
 	// create new empty transaction
@@ -601,7 +608,7 @@ func CreateRawTx(utxo Utxo, from string, to string, amountInSats int, feeInSats 
 	hash, err := chainhash.NewHashFromStr(utxo.Txid)
 	if err != nil {
 		fmt.Printf("could not get hash from transaction ID: %v", err)
-		return nil, "", err
+		return nil, err
 	}
 
 	outPoint := wire.NewOutPoint(hash, uint32(utxo.Vout))
@@ -610,23 +617,14 @@ func CreateRawTx(utxo Utxo, from string, to string, amountInSats int, feeInSats 
 	tx.AddTxIn(txIn)
 	fmt.Printf("TxID for TxIn: %s, index %d \n", utxo.Txid, utxo.Vout)
 
-	// create TxOut
-	// In the case of Relai, we'll often have to add MULTIPLE txOuts.
-	rcvScript := GetTxScript(to)
-	txOut := wire.NewTxOut(int64(amountInSats), rcvScript)
-	tx.AddTxOut(txOut)
-  
-	// create TxOut for change address, in this case, change address is sender itself
-	if changeAmount > 0 {
-		// return change BTC to its own address
-		rcvChangeAddressScript := GetTxScript(from) // todo other change address
-		txOut := wire.NewTxOut(int64(changeAmount), rcvChangeAddressScript)
+	// create multiple TxOut
+	for _, receiver := range receivers {
+		rcvScript := GetTxScript(receiver.Address)
+		txOut := wire.NewTxOut(int64(receiver.AmtInSats), rcvScript)
 		tx.AddTxOut(txOut)
 	}
 
-	rcvScriptHex := hex.EncodeToString(rcvScript)
-
-	return tx, rcvScriptHex, nil
+	return tx, nil
 }
 
 func JsonEncodeTransaction(tx *wire.MsgTx) (string, error) {
@@ -1001,31 +999,40 @@ func main() {
 
 	sendingAddress := "tb1qx03jk6rwpxkm0dy8mdx6yk06mj0a5m6q7ws5p6"
 	sendingPrivKey := "cPhJw9tQuE7Y61MCm8NJRgEjUwuV9mPL2SD3gJbRHn4maunEQKCW"
-	receivingAddress := "tb1qx03jk6rwpxkm0dy8mdx6yk06mj0a5m6q7ws5p6"
-	
-	amtInSats := 1234567
-        feeInSats := 200
-	totalAmtInSats := amtInSats + feeInSats
+	changeAddress := "tb1qx03jk6rwpxkm0dy8mdx6yk06mj0a5m6q7ws5p6" // for the reusability of this example, we'll send the change back to the address we're always sending from. In reality, we'll send the change to the Relai's cold storage solution.
+        feeInSats := 300
+	output1inSats := 1337
+	output2inSats := 420
 
-	// For this demo, let's get read the amtInSats (value of UTXO in sats) from the TESTNET blockchain
-	testnetUtxos := LoadTestnetUtxos(sendingAddress)
-	if len(testnetUtxos) == 0 {
-                fmt.Printf("Cannot find any UTXO for address %s.\n", sendingAddress)
-                log.Fatal(errors.New("No UTXOs found"))
-        }
-        totalAmtInSats = testnetUtxos[0].Value
-	amtInSats = totalAmtInSats - feeInSats
-
+	// Get information about the UTXO we are about to spend
 	fmt.Printf("Lookup UTXOs for address: %s\n", sendingAddress)
-
-        utxos = LoadTestnetUtxos(sendingAddress)
-
-        if len(utxos) == 0 {
+        testnetUtxos := LoadTestnetUtxos(sendingAddress)
+        if len(testnetUtxos) == 0 {
                 fmt.Printf("Cannot find any UTXO for address %s.\n", sendingAddress)
                 log.Fatal(errors.New("No UTXOs found"))
         }
+	availableAmtInSats := testnetUtxos[0].Value
+	changeInSats := availableAmtInSats - output1inSats - output2inSats - feeInSats
 
-	rawTx, pkScript, err := CreateRawTx(utxos[0], sendingAddress, receivingAddress, amtInSats, feeInSats)
+	// Let's always make the first 'receiver' to be the change address, resp. the money that we send to Relai's Cold Storage solution.
+	// This means that it will be the first output decrease in value, as we increase the fee over time (RBF)
+	var receivers = make([]Receiver, 3)
+	receivers[0] = Receiver {
+		Address: changeAddress,
+		AmtInSats: changeInSats,
+	}
+	// In order to demonstrate a multiple output transaction, let's send some money back to the testnet faucet:
+        receivers[1] = Receiver {
+                Address: "tb1qt0lenzqp8ay0ryehj7m3wwuds240mzhgdhqp4c",
+                AmtInSats: output1inSats,
+        }
+	// We can also send twice to the same address (creating two ouptuts for the same address)
+	receivers[2] = Receiver {
+                Address: "tb1qt0lenzqp8ay0ryehj7m3wwuds240mzhgdhqp4c",
+                AmtInSats: output2inSats,
+        }
+	
+	rawTx, err := CreateRawTx(testnetUtxos[0], sendingAddress, receivers, feeInSats)
 	
 	if err != nil {
         	log.Fatal(err)
@@ -1033,10 +1040,11 @@ func main() {
 
 	jsonEncodedRawTx, _ := JsonEncodeTransaction(rawTx)
 	fmt.Printf("\nRaw Transaction: %s\n", jsonEncodedRawTx)
-	fmt.Printf("\nPK Script: %s\n", pkScript)
 
 	// Signing
-	signedTx, txSize, _ := SignTx(sendingPrivKey, pkScript, rawTx, totalAmtInSats)
+	spendingScript := hex.EncodeToString(GetTxScript(sendingAddress))
+	fmt.Printf("\nSpending Script: %s\n", spendingScript)
+	signedTx, txSize, _ := SignTx(sendingPrivKey, spendingScript, rawTx, availableAmtInSats)
 	fmt.Printf("\nSigned Transaction [Hex]: %s", signedTx)
 	fmt.Printf("\nSigned Transaction Size: %d\n", txSize)
 
@@ -1066,15 +1074,15 @@ func main() {
 		// Rule nr. 4
 		feeBumpAmt := txSize * minRelayFee
 		feeInSats = feeInSats + feeBumpAmt // minimal fee increase. Can always be more than that.
-		amtInSats = amtInSats - feeBumpAmt
+		receivers[0].AmtInSats = receivers[0].AmtInSats - feeBumpAmt
 		// ^ Since we are paying more in fees the money we're paying more must be missing in another output.
 		// In this simple example transaction, we just shrink the amount the receiver of the transaction gets.
 		// In regular cases (and Relai's case too), you'd have a change address, which would shrink with rising transaction fees.
 
 		// Craft transaction again, but with higher fee:
-		rawTx, pkScript, err = CreateRawTx(utxos[0], sendingAddress, receivingAddress, amtInSats, feeInSats)
+		rawTx, err = CreateRawTx(testnetUtxos[0], sendingAddress, receivers, feeInSats)
 		jsonEncodedRawTx, _ = JsonEncodeTransaction(rawTx)
-		signedTx, txSize, _ = SignTx(sendingPrivKey, pkScript, rawTx, totalAmtInSats)
+		signedTx, txSize, _ = SignTx(sendingPrivKey, spendingScript, rawTx, availableAmtInSats)
         	fmt.Printf("\nRBF Signed Transaction [Hex]: %s", signedTx)
 	        fmt.Printf("\nRBF Signed Transaction Size: %d\n", txSize)
 
