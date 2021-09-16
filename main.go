@@ -612,34 +612,41 @@ type Receiver struct {
 }
 
 // Pass UTXO if you want to RBF, otherwise just pass nil (function will also return the used UTXO, for RBF purposes)
-func CreateRawTx(utxo Utxo, from string, receivers []Receiver, feeInSats int) (*wire.MsgTx, error) {
+func CreateRawTx(utxos []Utxo, receivers []Receiver, feeInSats int) (*wire.MsgTx, error) {
 	spendAmount := feeInSats
 	for _, receiver := range receivers {
 		spendAmount += receiver.AmtInSats
 	}
 
-	if utxo.Value < spendAmount {
-		fmt.Printf("Utxo contains %d sats. Trying to spend %d sats and %d sats in fees is not possible.\n", utxo.Value, spendAmount, feeInSats)
+	satsAvailable := 0
+	for _, utxo := range utxos {
+		satsAvailable += utxo.Value
+	}
+
+	if satsAvailable < spendAmount {
+		fmt.Printf("Utxos contain %d sats. Trying to spend %d sats and %d sats in fees is not possible.\n", satsAvailable, spendAmount, feeInSats)
                 return nil, errors.New("UTXO doesn't contain enough coins")
 	}
 
 	// create new empty transaction
 	tx := wire.NewMsgTx(wire.TxVersion)
 	
-	// create single txIn
-	hash, err := chainhash.NewHashFromStr(utxo.Txid)
-	if err != nil {
-		fmt.Printf("could not get hash from transaction ID: %v", err)
-		return nil, err
+	// create multiple txIns
+	for _, utxo := range utxos {
+		hash, err := chainhash.NewHashFromStr(utxo.Txid)
+		if err != nil {
+			fmt.Printf("could not get hash from transaction ID: %v", err)
+			return nil, err
+		}
+
+		outPoint := wire.NewOutPoint(hash, uint32(utxo.Vout))
+		txIn := wire.NewTxIn(outPoint, nil, nil)
+		txIn.Sequence = 4294967293 // Signal BIP 125 Replace-By-Fee
+		tx.AddTxIn(txIn)
+		fmt.Printf("TxID for TxIn: %s, index %d \n", utxo.Txid, utxo.Vout)
 	}
 
-	outPoint := wire.NewOutPoint(hash, uint32(utxo.Vout))
-	txIn := wire.NewTxIn(outPoint, nil, nil)
-	txIn.Sequence = 4294967293 // Signal BIP 125 Replace-By-Fee
-	tx.AddTxIn(txIn)
-	fmt.Printf("TxID for TxIn: %s, index %d \n", utxo.Txid, utxo.Vout)
-
-	// create multiple TxOut
+	// create multiple TxOuts
 	for _, receiver := range receivers {
 		rcvScript := GetTxScript(receiver.Address)
 		txOut := wire.NewTxOut(int64(receiver.AmtInSats), rcvScript)
@@ -675,7 +682,7 @@ func GetTxScript(addressStr string) []byte {
                 fmt.Println(err)
                 return nil
         }
-        fmt.Printf("Script Hex: %x\n", script)
+        fmt.Printf("Script Hex for Address %s: %x\n", addressStr, script)
 
         disasm, err := txscript.DisasmString(script)
         if err != nil {
@@ -687,37 +694,38 @@ func GetTxScript(addressStr string) []byte {
 	return script
 }
 
-func SignTxWithWifPrivKey(privKey string, pkScript string, redeemTx *wire.MsgTx, availableAmtInSats int) (string, int, error) {
+func GetSignatureFromWifPrivKey(privKey string, pkScript string, redeemTx *wire.MsgTx, availableAmtInSats int, idx int) (wire.TxWitness, error) {
 
    wif, err := btcutil.DecodeWIF(privKey)
    if err != nil {
-      return "", 0, err
+      return nil, err
    }
 
    // fmt.Println("privkey [wif]: ", wif)
    // fmt.Println("wif.PrivKey: ", wif.PrivKey)
 
-   return SignTx(wif.PrivKey, pkScript, redeemTx, availableAmtInSats);
+   return GetSignature(wif.PrivKey, pkScript, redeemTx, availableAmtInSats, idx);
 }
 
-
-func SignTx(privKey *btcec.PrivateKey, pkScript string, redeemTx *wire.MsgTx, availableAmtInSats int) (string, int, error) {
-
+func GetSignature(privKey *btcec.PrivateKey, pkScript string, redeemTx *wire.MsgTx, availableAmtInSats int, idx int) (wire.TxWitness, error) {
    sourcePKScript, err := hex.DecodeString(pkScript)
    if err != nil {
-      return "", 0, err
+      return nil, err
    }
 
    // WitnessSignature(tx *wire.MsgTx, sigHashes *TxSigHashes, idx int, amt int64, subscript []byte, hashType SigHashType, privKey *btcec.PrivateKey, compress bool)
-   signature, err := txscript.WitnessSignature(redeemTx, txscript.NewTxSigHashes(redeemTx), 0, int64(availableAmtInSats), sourcePKScript, txscript.SigHashAll, privKey, true)
+   signature, err := txscript.WitnessSignature(redeemTx, txscript.NewTxSigHashes(redeemTx), idx, int64(availableAmtInSats), sourcePKScript, txscript.SigHashAll, privKey, true)
    if err != nil {
-      return "", 0, err
+      return nil, err
    }
 
-   // since there is only one input, and want to add
-   // signature to it use 0 as index
-//   redeemTx.TxIn[0].SignatureScript = signature
-   redeemTx.TxIn[0].Witness = signature
+   return signature, nil
+}
+
+func GetSignedTx(witnesses []wire.TxWitness, redeemTx *wire.MsgTx) (string, int, error) {
+   for index, witness := range witnesses {
+	redeemTx.TxIn[index].Witness = witness 
+   }
 
    var signedTx bytes.Buffer
    redeemTx.Serialize(&signedTx)
@@ -727,7 +735,6 @@ func SignTx(privKey *btcec.PrivateKey, pkScript string, redeemTx *wire.MsgTx, av
 
    return hexSignedTx, len(signedTxBytes), nil
 }
-
 
 // We don't host any Service for Bitcoin TESTNET at Relai.
 // Therefore, we are going to use the API at blockstream.info instead.
@@ -1026,12 +1033,13 @@ func main() {
         // ==============================================
 
 	kmtx, err := NewKeyManager(256, "", "afford invest lady negative mango left hurdle three tragic short outside gentle dawn combine action obvious ready move dune reduce puppy nature choice diagram")
-	// Derivation of the path m/84'/0'/0'/0/0 will lead to the following key pair:
-	// Address:					Private Key:
-	// tb1qt9fwjhxw9vrzfg6kvlnjpkha9yq7qrr4268ll5	cMiYaWA9ctZg2F3uLFQ4GENxcKDxJdUUqMLBobiPKRVYwMuxdqiK
+	// This mnemonic will lead to the following derivations of the path m/84'/0'/0'/0/0 will lead to the following key pair:
+	// Path:		Address:					Private Key:
+	// m/84'/0'/0'/0/0	tb1qt9fwjhxw9vrzfg6kvlnjpkha9yq7qrr4268ll5	cMiYaWA9ctZg2F3uLFQ4GENxcKDxJdUUqMLBobiPKRVYwMuxdqiK
+	// m/84'/0'/0'/0/1	tb1qv2mmufs5we35fn0aeflqynm38343ju7zuqc8as	cQHpyYib4qGb4x6QSBxVDSJVtQNwuPRm2dmfKrAJw4PDZq21G5qR
 	// 
 	// CAUTION!
-	// The correct path for deriving the first *TESTNET* address would be: m/84'/1'/0'/0/0
+	// The correct path for deriving the first *TESTNET* address would be: m/84'/1'/0'/0/0 (character 7 is a 1 instead of a 0)
 	// However, since what we really need is MAINNET but it's too costly to test our code in MAINNET, we still derive the keys as if they were MAINNET keys (path m/84'/0'/0'/0/0),
 	// but then we just derive TESTNET addresses from the given keys.
 
@@ -1039,31 +1047,41 @@ func main() {
                 log.Fatal(err)
         }
 
-	keytx, err := kmtx.GetKey(PurposeBIP84, CoinTypeBTC, 0, 0, 0);
+	keytx1, err := kmtx.GetKey(PurposeBIP84, CoinTypeBTC, 0, 0, 0);
 
         if err != nil {
                 log.Fatal(err)
         }
 
-	privKeytx, _ := btcec.PrivKeyFromBytes(btcec.S256(), keytx.bip32Key.Key);
-	
-	/* DEBUGGING
-	wif, address, err := GenerateFromBytesTestnet(privKeytx, true)
+	privKeytx1, _ := btcec.PrivKeyFromBytes(btcec.S256(), keytx1.bip32Key.Key);
 
-	if err != nil {
+	/* DEBUGGING
+        wif, address, err := GenerateFromBytesTestnet(privKeytx, true)
+
+        if err != nil {
                 log.Fatal(err)
         }
 
-	fmt.Printf("\n[DEBUG] WIF: %s\n", wif);
-	fmt.Printf("[DEBUG] address: %s\n", address);
-       
-	*/
+        fmt.Printf("\n[DEBUG] WIF: %s\n", wif);
+        fmt.Printf("[DEBUG] address: %s\n", address);
 
+        */
+
+        keytx2, err := kmtx.GetKey(PurposeBIP84, CoinTypeBTC, 0, 0, 1);
+
+        if err != nil {
+                log.Fatal(err)
+        }
+
+        privKeytx2, _ := btcec.PrivKeyFromBytes(btcec.S256(), keytx2.bip32Key.Key);
+	
 	fmt.Println("\nCRAFT A TRANSACTION")
 
 	sendingAddress := "tb1qt9fwjhxw9vrzfg6kvlnjpkha9yq7qrr4268ll5" // As described above, this is the first address derived from the Seed, with the path m/84'/0'/0'/0/0 . I don't derive it dynamically because the code is written to be used for MAINNET addresses.
+	sendingAddress2 := "tb1qv2mmufs5we35fn0aeflqynm38343ju7zuqc8as"
 	changeAddress := "tb1qt9fwjhxw9vrzfg6kvlnjpkha9yq7qrr4268ll5" // for the reusability of this example, we'll send the change back to the address we're always sending from. In reality, we'll send the change to the Relai's cold storage solution.
-        feeInSats := 300
+        feeInSats := 500
+	secondKeyPairInSats := 10000
 	output1inSats := 1337
 	output2inSats := 420
 
@@ -1074,12 +1092,19 @@ func main() {
                 fmt.Printf("Cannot find any UTXO for address %s.\n", sendingAddress)
                 log.Fatal(errors.New("No UTXOs found"))
         }
-	availableAmtInSats := testnetUtxos[0].Value
-	changeInSats := availableAmtInSats - output1inSats - output2inSats - feeInSats
+	fmt.Printf("Lookup UTXOs for address: %s\n", sendingAddress2)
+	testnetUtxos2 := LoadTestnetUtxos(sendingAddress2)
+        if len(testnetUtxos) == 0 {
+                fmt.Printf("Cannot find any UTXO for address %s.\n", sendingAddress2)
+                log.Fatal(errors.New("No UTXOs found"))
+        }
+
+	availableAmtInSats := testnetUtxos[0].Value + testnetUtxos2[0].Value
+	changeInSats := availableAmtInSats - output1inSats - output2inSats - secondKeyPairInSats - feeInSats
 
 	// Let's always make the first 'receiver' to be the change address, resp. the money that we send to Relai's Cold Storage solution.
 	// This means that it will be the first output decrease in value, as we increase the fee over time (RBF)
-	var receivers = make([]Receiver, 3)
+	var receivers = make([]Receiver, 4)
 	receivers[0] = Receiver {
 		Address: changeAddress,
 		AmtInSats: changeInSats,
@@ -1094,8 +1119,16 @@ func main() {
                 Address: "tb1qt0lenzqp8ay0ryehj7m3wwuds240mzhgdhqp4c",
                 AmtInSats: output2inSats,
         }
+	receivers[3] = Receiver {
+                Address: sendingAddress2,
+                AmtInSats: secondKeyPairInSats,
+        }
+
+	var utxosToConsume = make([]Utxo, 2)
+	utxosToConsume[0] = testnetUtxos[0]
+	utxosToConsume[1] = testnetUtxos2[0]
 	
-	rawTx, err := CreateRawTx(testnetUtxos[0], sendingAddress, receivers, feeInSats)
+	rawTx, err := CreateRawTx(utxosToConsume, receivers, feeInSats)
 	
 	if err != nil {
         	log.Fatal(err)
@@ -1104,10 +1137,27 @@ func main() {
 	jsonEncodedRawTx, _ := JsonEncodeTransaction(rawTx)
 	fmt.Printf("\nRaw Transaction: %s\n", jsonEncodedRawTx)
 
-	// Signing
-	spendingScript := hex.EncodeToString(GetTxScript(sendingAddress))
-	fmt.Printf("\nSpending Script: %s\n", spendingScript)
-	signedTx, txSize, _ := SignTx(privKeytx, spendingScript, rawTx, availableAmtInSats)
+	witnesses := make([]wire.TxWitness, 2)
+
+	// Signature for first input
+	spendingScript1 := hex.EncodeToString(GetTxScript(sendingAddress))
+	fmt.Printf("\nSpending Script 1: %s\n", spendingScript1)
+	sig1, err := GetSignature(privKeytx1, spendingScript1, rawTx, utxosToConsume[0].Value, 0) // The last parameter is the index number the utxo will have as an input. This will be the first input.
+	if err != nil {
+                log.Fatal(err)
+        }
+	witnesses[0] = sig1
+
+	// Signature for second input
+	spendingScript2 := hex.EncodeToString(GetTxScript(sendingAddress2))
+        fmt.Printf("\nSpending Script 2: %s\n", spendingScript2)
+        sig2, err :=  GetSignature(privKeytx2, spendingScript2, rawTx, utxosToConsume[1].Value, 1) // The last parameter is the index number the utxo will have as an input. This will be the second input.
+        if err != nil {
+                log.Fatal(err)
+        }
+        witnesses[1] = sig2
+
+	signedTx, txSize, _ := GetSignedTx(witnesses, rawTx)
 	fmt.Printf("\nSigned Transaction [Hex]: %s", signedTx)
 	fmt.Printf("\nSigned Transaction Size: %d\n", txSize)
 
@@ -1143,9 +1193,29 @@ func main() {
 		// In regular cases (and Relai's case too), you'd have a change address, which would shrink with rising transaction fees.
 
 		// Craft transaction again, but with higher fee:
-		rawTx, err = CreateRawTx(testnetUtxos[0], sendingAddress, receivers, feeInSats)
+		rawTx, err = CreateRawTx(utxosToConsume, receivers, feeInSats)
 		jsonEncodedRawTx, _ = JsonEncodeTransaction(rawTx)
-		signedTx, txSize, _ = SignTx(privKeytx, spendingScript, rawTx, availableAmtInSats)
+
+		// Signature for first input
+	        spendingScript1 := hex.EncodeToString(GetTxScript(sendingAddress))
+	        fmt.Printf("\nSpending Script 1: %s\n", spendingScript1)
+	        sig1, err := GetSignature(privKeytx1, spendingScript1, rawTx, utxosToConsume[0].Value, 0)
+	        if err != nil {
+	                log.Fatal(err)
+	        }
+	        witnesses[0] = sig1
+
+	        // Signature for second input
+	        spendingScript2 := hex.EncodeToString(GetTxScript(sendingAddress2))
+	        fmt.Printf("\nSpending Script 2: %s\n", spendingScript2)
+	        sig2, err :=  GetSignature(privKeytx2, spendingScript2, rawTx, utxosToConsume[1].Value, 1)
+	        if err != nil {
+	                log.Fatal(err)
+	        }
+	        witnesses[1] = sig2
+
+        	signedTx, _, _ := GetSignedTx(witnesses, rawTx)
+
         	fmt.Printf("\nRBF Signed Transaction [Hex]: %s", signedTx)
 	        fmt.Printf("\nRBF Signed Transaction Size: %d\n", txSize)
 
@@ -1157,7 +1227,7 @@ func main() {
 		time.Sleep(time.Duration(intervalBetweenRbfReplacementsSecs) * time.Second)
 	}
 
-	fmt.Println("Transaction is now confirmed. Txid:", txid)
+	fmt.Printf("Transaction is now confirmed. Txid: %s\n\n", txid)
 
 
 	// ==================================================
@@ -1200,15 +1270,23 @@ func main() {
                 AmtInSats: tx2_output2inSats,
         }
 	
-	tx2_rawTx, err := CreateRawTx(tx2_testnetUtxos[0], tx2_sendingAddress, tx2_receivers, tx2_feeInSats)
-	
-	if err != nil {
-        	log.Fatal(err)
+
+	tx2_rawTx, err := CreateRawTx(tx2_testnetUtxos, tx2_receivers, tx2_feeInSats)
+        
+        if err != nil {
+                log.Fatal(err)
         }
 
-	// Signing
-	tx2_spendingScript := hex.EncodeToString(GetTxScript(tx2_sendingAddress))
-	tx2_signedTx, txSize, _ := SignTxWithWifPrivKey(sendingPrivKey, tx2_spendingScript, tx2_rawTx, tx2_availableAmtInSats)
+        tx2_witnesses := make([]wire.TxWitness, 1)
+
+        tx2_spendingScript := hex.EncodeToString(GetTxScript(tx2_sendingAddress))
+        tx2_sig, err := GetSignatureFromWifPrivKey(sendingPrivKey, tx2_spendingScript, tx2_rawTx, tx2_testnetUtxos[0].Value, 0)
+        if err != nil {
+                log.Fatal(err)
+        }
+        tx2_witnesses[0] = tx2_sig
+
+        tx2_signedTx, _, _ := GetSignedTx(tx2_witnesses, tx2_rawTx)
 
 	// Broadcasting
 	BroadcastTx(tx2_signedTx)
