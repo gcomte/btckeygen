@@ -476,6 +476,28 @@ func GenerateFromBytes(prvKey *btcec.PrivateKey, compress bool) (wif, address st
 	return wif, address, nil
 }
 
+/* Used for DEBUGGING only
+func GenerateFromBytesTestnet(prvKey *btcec.PrivateKey, compress bool) (wif, address string, err error) {
+        // generate the wif(wallet import format) string
+        btcwif, err := btcutil.NewWIF(prvKey, &chaincfg.TestNet3Params, compress)
+        if err != nil {
+                return "", "", err
+        }
+        wif = btcwif.String()
+
+        // generate a normal p2wkh address from the pubkey hash
+        serializedPubKey := btcwif.SerializePubKey()
+        witnessProg := btcutil.Hash160(serializedPubKey)
+        addressWitnessPubKeyHash, err := btcutil.NewAddressWitnessPubKeyHash(witnessProg, &chaincfg.TestNet3Params)
+        if err != nil {
+                return "", "", err
+        }
+        address = addressWitnessPubKeyHash.EncodeAddress()
+
+        return wif, address, nil
+}
+*/
+
 func GeneratePubFromBytes(pubKey *btcec.PublicKey, compress bool) (address string, err error) {
 	// generate a normal p2wkh address from the pubkey hash
         serializedPubKey := pubKey.SerializeCompressed()
@@ -665,15 +687,21 @@ func GetTxScript(addressStr string) []byte {
 	return script
 }
 
-func SignTx(privKey string, pkScript string, redeemTx *wire.MsgTx, availableAmtInSats int) (string, int, error) {
+func SignTxWithWifPrivKey(privKey string, pkScript string, redeemTx *wire.MsgTx, availableAmtInSats int) (string, int, error) {
 
    wif, err := btcutil.DecodeWIF(privKey)
    if err != nil {
       return "", 0, err
    }
 
-   fmt.Println("privkey [wif]: ", wif)
-   fmt.Println("wif.PrivKey: ", wif.PrivKey)
+   // fmt.Println("privkey [wif]: ", wif)
+   // fmt.Println("wif.PrivKey: ", wif.PrivKey)
+
+   return SignTx(wif.PrivKey, pkScript, redeemTx, availableAmtInSats);
+}
+
+
+func SignTx(privKey *btcec.PrivateKey, pkScript string, redeemTx *wire.MsgTx, availableAmtInSats int) (string, int, error) {
 
    sourcePKScript, err := hex.DecodeString(pkScript)
    if err != nil {
@@ -681,7 +709,7 @@ func SignTx(privKey string, pkScript string, redeemTx *wire.MsgTx, availableAmtI
    }
 
    // WitnessSignature(tx *wire.MsgTx, sigHashes *TxSigHashes, idx int, amt int64, subscript []byte, hashType SigHashType, privKey *btcec.PrivateKey, compress bool)
-   signature, err := txscript.WitnessSignature(redeemTx, txscript.NewTxSigHashes(redeemTx), 0, int64(availableAmtInSats), sourcePKScript, txscript.SigHashAll, wif.PrivKey, true)
+   signature, err := txscript.WitnessSignature(redeemTx, txscript.NewTxSigHashes(redeemTx), 0, int64(availableAmtInSats), sourcePKScript, txscript.SigHashAll, privKey, true)
    if err != nil {
       return "", 0, err
    }
@@ -699,6 +727,7 @@ func SignTx(privKey string, pkScript string, redeemTx *wire.MsgTx, availableAmtI
 
    return hexSignedTx, len(signedTxBytes), nil
 }
+
 
 // We don't host any Service for Bitcoin TESTNET at Relai.
 // Therefore, we are going to use the API at blockstream.info instead.
@@ -991,15 +1020,49 @@ func main() {
 		fmt.Printf("%-18s %s \t%d\n", key.GetPath(), address, len(utxos))
 	}
 
-	// =====================
-        // CRAFTING TRANSACTIONS
-        // =====================
+
+        // ==============================================
+        // CRAFTING TRANSACTIONS [Starting from Mnemonic]
+        // ==============================================
+
+	kmtx, err := NewKeyManager(256, "", "afford invest lady negative mango left hurdle three tragic short outside gentle dawn combine action obvious ready move dune reduce puppy nature choice diagram")
+	// Derivation of the path m/84'/0'/0'/0/0 will lead to the following key pair:
+	// Address:					Private Key:
+	// tb1qt9fwjhxw9vrzfg6kvlnjpkha9yq7qrr4268ll5	cMiYaWA9ctZg2F3uLFQ4GENxcKDxJdUUqMLBobiPKRVYwMuxdqiK
+	// 
+	// CAUTION!
+	// The correct path for deriving the first *TESTNET* address would be: m/84'/1'/0'/0/0
+	// However, since what we really need is MAINNET but it's too costly to test our code in MAINNET, we still derive the keys as if they were MAINNET keys (path m/84'/0'/0'/0/0),
+	// but then we just derive TESTNET addresses from the given keys.
+
+        if err != nil {
+                log.Fatal(err)
+        }
+
+	keytx, err := kmtx.GetKey(PurposeBIP84, CoinTypeBTC, 0, 0, 0);
+
+        if err != nil {
+                log.Fatal(err)
+        }
+
+	privKeytx, _ := btcec.PrivKeyFromBytes(btcec.S256(), keytx.bip32Key.Key);
+	
+	/* DEBUGGING
+	wif, address, err := GenerateFromBytesTestnet(privKeytx, true)
+
+	if err != nil {
+                log.Fatal(err)
+        }
+
+	fmt.Printf("\n[DEBUG] WIF: %s\n", wif);
+	fmt.Printf("[DEBUG] address: %s\n", address);
+       
+	*/
 
 	fmt.Println("\nCRAFT A TRANSACTION")
 
-	sendingAddress := "tb1qx03jk6rwpxkm0dy8mdx6yk06mj0a5m6q7ws5p6"
-	sendingPrivKey := "cPhJw9tQuE7Y61MCm8NJRgEjUwuV9mPL2SD3gJbRHn4maunEQKCW"
-	changeAddress := "tb1qx03jk6rwpxkm0dy8mdx6yk06mj0a5m6q7ws5p6" // for the reusability of this example, we'll send the change back to the address we're always sending from. In reality, we'll send the change to the Relai's cold storage solution.
+	sendingAddress := "tb1qt9fwjhxw9vrzfg6kvlnjpkha9yq7qrr4268ll5" // As described above, this is the first address derived from the Seed, with the path m/84'/0'/0'/0/0 . I don't derive it dynamically because the code is written to be used for MAINNET addresses.
+	changeAddress := "tb1qt9fwjhxw9vrzfg6kvlnjpkha9yq7qrr4268ll5" // for the reusability of this example, we'll send the change back to the address we're always sending from. In reality, we'll send the change to the Relai's cold storage solution.
         feeInSats := 300
 	output1inSats := 1337
 	output2inSats := 420
@@ -1044,7 +1107,7 @@ func main() {
 	// Signing
 	spendingScript := hex.EncodeToString(GetTxScript(sendingAddress))
 	fmt.Printf("\nSpending Script: %s\n", spendingScript)
-	signedTx, txSize, _ := SignTx(sendingPrivKey, spendingScript, rawTx, availableAmtInSats)
+	signedTx, txSize, _ := SignTx(privKeytx, spendingScript, rawTx, availableAmtInSats)
 	fmt.Printf("\nSigned Transaction [Hex]: %s", signedTx)
 	fmt.Printf("\nSigned Transaction Size: %d\n", txSize)
 
@@ -1082,7 +1145,7 @@ func main() {
 		// Craft transaction again, but with higher fee:
 		rawTx, err = CreateRawTx(testnetUtxos[0], sendingAddress, receivers, feeInSats)
 		jsonEncodedRawTx, _ = JsonEncodeTransaction(rawTx)
-		signedTx, txSize, _ = SignTx(sendingPrivKey, spendingScript, rawTx, availableAmtInSats)
+		signedTx, txSize, _ = SignTx(privKeytx, spendingScript, rawTx, availableAmtInSats)
         	fmt.Printf("\nRBF Signed Transaction [Hex]: %s", signedTx)
 	        fmt.Printf("\nRBF Signed Transaction Size: %d\n", txSize)
 
@@ -1095,4 +1158,59 @@ func main() {
 	}
 
 	fmt.Println("Transaction is now confirmed. Txid:", txid)
+
+
+	// ==================================================
+        // CRAFTING TRANSACTIONS [Starting from WIF key-pair]
+        // ==================================================
+
+	// We don't need this [entire section]. I'll just leave it here for the record though. But it doesn't print anyhting, such that it doesn't cause any confusion. (It still emits a transaction though.)
+
+	tx2_sendingAddress := "tb1qx03jk6rwpxkm0dy8mdx6yk06mj0a5m6q7ws5p6"
+	sendingPrivKey := "cPhJw9tQuE7Y61MCm8NJRgEjUwuV9mPL2SD3gJbRHn4maunEQKCW"
+	tx2_changeAddress := "tb1qx03jk6rwpxkm0dy8mdx6yk06mj0a5m6q7ws5p6" // for the reusability of this example, we'll send the change back to the address we're always sending from. In reality, we'll send the change to the Relai's cold storage solution.
+        tx2_feeInSats := 300
+	tx2_output1inSats := 1337
+	tx2_output2inSats := 420
+
+	// Get information about the UTXO we are about to spend
+        tx2_testnetUtxos := LoadTestnetUtxos(tx2_sendingAddress)
+        if len(tx2_testnetUtxos) == 0 {
+                fmt.Printf("Cannot find any UTXO for address %s.\n", tx2_sendingAddress)
+                log.Fatal(errors.New("No UTXOs found"))
+        }
+	tx2_availableAmtInSats := tx2_testnetUtxos[0].Value
+	tx2_changeInSats := tx2_availableAmtInSats - tx2_output1inSats - tx2_output2inSats - tx2_feeInSats
+
+	// Let's always make the first 'receiver' to be the change address, resp. the money that we send to Relai's Cold Storage solution.
+	// This means that it will be the first output decrease in value, as we increase the fee over time (RBF)
+	var tx2_receivers = make([]Receiver, 3)
+	tx2_receivers[0] = Receiver {
+		Address: tx2_changeAddress,
+		AmtInSats: tx2_changeInSats,
+	}
+	// In order to demonstrate a multiple output transaction, let's send some money back to the testnet faucet:
+        tx2_receivers[1] = Receiver {
+                Address: "tb1qt0lenzqp8ay0ryehj7m3wwuds240mzhgdhqp4c",
+                AmtInSats: tx2_output1inSats,
+        }
+	// We can also send twice to the same address (creating two ouptuts for the same address)
+	tx2_receivers[2] = Receiver {
+                Address: "tb1qt0lenzqp8ay0ryehj7m3wwuds240mzhgdhqp4c",
+                AmtInSats: tx2_output2inSats,
+        }
+	
+	tx2_rawTx, err := CreateRawTx(tx2_testnetUtxos[0], tx2_sendingAddress, tx2_receivers, tx2_feeInSats)
+	
+	if err != nil {
+        	log.Fatal(err)
+        }
+
+	// Signing
+	tx2_spendingScript := hex.EncodeToString(GetTxScript(tx2_sendingAddress))
+	tx2_signedTx, txSize, _ := SignTxWithWifPrivKey(sendingPrivKey, tx2_spendingScript, tx2_rawTx, tx2_availableAmtInSats)
+
+	// Broadcasting
+	BroadcastTx(tx2_signedTx)
+
 }
